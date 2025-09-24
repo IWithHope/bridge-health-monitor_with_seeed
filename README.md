@@ -32,23 +32,15 @@ This project combines **IoT hardware, embedded ML, and web technologies** to pro
 
 ## 📂 Project Structure
 Bridge-Health-Detector/
-│
-├── SeeedStudio/ # Firmware for Seeed Studio board
-│ └── main.ino # Arduino sketch with Edge Impulse model
-│
-├── dataset/ # Collected vibration dataset
-│ └── data.csv
-│
-├── stream_server.py # Python Flask server for serial data
-│
-├── bridge_model.tflite # TensorFlow Lite model (optional for reference)
-│
-├──  model_data.h  # Model exported as C++ header for Arduino
-│
-├──  scaler.pkl # Preprocessing scaler (used for retraining)
-│
-├──  scaler.pkl # Preprocessing scaler (used for retraining)
-│
-├──  stream_infer_ble.py # Python script for BLE-based inference streaming
-│
-└── README.md # Project documentation (this file)
+
+-SeeedStudio/ # Firmware for Seeed Studio board
+    -main.ino # Arduino sketch with Edge Impulse model
+- dataset/ # Collected vibration dataset
+   -data.csv
+-stream_server.py # Python Flask server for serial data
+-bridge_model.tflite # TensorFlow Lite model (optional for reference)
+-model_data.h  # Model exported as C++ header for Arduino
+-scaler.pkl # Preprocessing scaler (used for retraining)
+-scaler.pkl # Preprocessing scaler (used for retraining)
+-stream_infer_ble.py # Python script for BLE-based inference streaming
+-README.md # Project documentation (this file)
