@@ -1,0 +1,164 @@
+/*
+  Edge Impulse inferencing adapted for Seeed XIAO nRF52840 Sense (LSM6DS3, SparkFun library)
+  Fixed: replaced numpy::roll(...) calls with roll_buffer(...)
+*/
+
+#include <new_inferencing.h>      // Edge Impulse generated inference header (keep as-is)
+#include <LSM6DS3.h>              // SparkFun LSM6DS3 library
+#include <Wire.h>                 // required by LSM6DS3
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+// Constants (adjust if your Edge Impulse model was trained with a different sensor range)
+#define CONVERT_G_TO_MS2       9.80665f
+#define MAX_ACCEPTED_RANGE     2.0f   // set to 4.0f if your model expects +-4g
+
+/* Globals from EI template */
+static bool debug_nn = false;
+static const uint32_t RUN_INFERENCE_EVERY_MS = 200;
+static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
+static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+uint64_t last_sample_micros = 0;
+uint32_t last_inference_ms = 0;
+
+// Create IMU object (I²C mode)
+LSM6DS3 myIMU(I2C_MODE, 0x6A);  // XIAO Sense default I²C address: 0x6A
+
+/* Forward declarations */
+void run_inference_once();
+float ei_get_sign(float number);
+
+/*
+  roll_buffer: safe replacement for numpy::roll
+*/
+void roll_buffer(float *arr, size_t n, int shift) {
+  if (n == 0) return;
+  int s = shift % (int)n;
+  if (s < 0) s += (int)n;
+  if (s == 0) return;
+
+  size_t bytes = (size_t)s * sizeof(float);
+  float *tmp = (float *) malloc(bytes);
+  if (!tmp) {
+    for (int i = 0; i < s; ++i) {
+      float first = arr[0];
+      memmove(arr, arr + 1, (n - 1) * sizeof(float));
+      arr[n - 1] = first;
+    }
+    return;
+  }
+
+  memcpy(tmp, arr, bytes);
+  memmove(arr, arr + s, (n - s) * sizeof(float));
+  memcpy(arr + (n - s), tmp, bytes);
+  free(tmp);
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) { delay(10); }
+  Serial.println("Edge Impulse Inference (Seeed XIAO nRF52840 Sense, SparkFun LSM6DS3)");
+
+  if (myIMU.begin() != 0) {
+    ei_printf("Failed to initialize IMU (LSM6DS3)!\r\n");
+  } else {
+    ei_printf("IMU initialized (LSM6DS3)\r\n");
+  }
+
+  if (EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME != 3) {
+    ei_printf("ERR: EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME should be 3 (x,y,z)\n");
+  }
+
+  last_sample_micros = micros();
+  last_inference_ms = millis();
+
+  // Warm-fill buffer
+  size_t warm_iterations = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE / EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME;
+  for (size_t i = 0; i < warm_iterations; ++i) {
+    roll_buffer(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, 3);
+
+    float ax = myIMU.readFloatAccelX();
+    float ay = myIMU.readFloatAccelY();
+    float az = myIMU.readFloatAccelZ();
+
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = ax;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = ay;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = az;
+
+    for (int j = 0; j < 3; ++j) {
+      float &v = buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3 + j];
+      if (fabs(v) > MAX_ACCEPTED_RANGE) v = ei_get_sign(v) * MAX_ACCEPTED_RANGE;
+      v *= CONVERT_G_TO_MS2;
+    }
+    delay(EI_CLASSIFIER_INTERVAL_MS);
+  }
+}
+
+void loop() {
+  uint64_t next_tick = (uint64_t)last_sample_micros + (uint64_t)EI_CLASSIFIER_INTERVAL_MS * 1000ULL;
+  uint64_t now = micros();
+
+  if (now >= next_tick) {
+    last_sample_micros = now;
+
+    roll_buffer(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, 3);
+
+    float ax = myIMU.readFloatAccelX();
+    float ay = myIMU.readFloatAccelY();
+    float az = myIMU.readFloatAccelZ();
+
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = ax;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = ay;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = az;
+
+    for (int i = 0; i < 3; i++) {
+      float &v = buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3 + i];
+      if (fabs(v) > MAX_ACCEPTED_RANGE) {
+        v = ei_get_sign(v) * MAX_ACCEPTED_RANGE;
+      }
+      v *= CONVERT_G_TO_MS2;
+    }
+  }
+
+  uint32_t now_ms = millis();
+  if ((uint32_t)(now_ms - last_inference_ms) >= RUN_INFERENCE_EVERY_MS) {
+    last_inference_ms = now_ms;
+    run_inference_once();
+  }
+
+  delay(1);
+}
+
+float ei_get_sign(float number) {
+  return (number >= 0.0f) ? 1.0f : -1.0f;
+}
+
+void run_inference_once() {
+  memcpy(inference_buffer, buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
+
+  signal_t signal;
+  int err = numpy::signal_from_buffer(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+  if (err != 0) {
+    ei_printf("Failed to create signal from buffer (%d)\n", err);
+    return;
+  }
+
+  ei_impulse_result_t result = { 0 };
+  err = run_classifier(&signal, &result, debug_nn);
+  if (err != EI_IMPULSE_OK) {
+    ei_printf("ERR: Failed to run classifier (%d)\n", err);
+    return;
+  }
+
+  ei_printf("Predictions ");
+  ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.)",
+            result.timing.dsp, result.timing.classification, result.timing.anomaly);
+  ei_printf(": ");
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+    ei_printf("%s: %.5f ", result.classification[ix].label, result.classification[ix].value);
+  }
+  ei_printf("\n");
+}
